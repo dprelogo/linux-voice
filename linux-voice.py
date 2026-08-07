@@ -671,18 +671,13 @@ def install_agent():
     python_path = sys.executable
     script_path = Path(__file__).resolve()
 
-    api_key_name = "GROQ_API_KEY" if BACKEND == "groq" else "OPENAI_API_KEY"
-    api_key = (
-        CONFIG.get("transcription", {}).get("api_key", "")
-        or os.environ.get(api_key_name, "")
-    )
-
-    env_block = f"""        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"""
-    if api_key:
-        env_block = f"""        <key>{api_key_name}</key>
-        <string>{api_key}</string>
-        <key>PATH</key>
+    # The API key is deliberately never written into the plist. A plist is
+    # world-readable and `launchctl print` echoes EnvironmentVariables in
+    # full, so a key baked in here leaks into any launchd debugging output.
+    # The daemon inherits the key from ~/.zshenv instead, which the
+    # /bin/zsh -c wrapper below sources (a non-interactive zsh reads
+    # .zshenv, never .zshrc).
+    env_block = """        <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"""
 
     # Run through /bin/zsh so the process inherits Accessibility permissions
