@@ -129,11 +129,37 @@ class MacOS(PlatformInterface):
         self._Key = Key
 
     def get_active_app(self):
+        """Return the application owning the frontmost on-screen window.
+
+        NSWorkspace.frontmostApplication() is not usable here: in a launchd
+        agent it answers with the app that was frontmost the first time it
+        was called and never updates, regardless of run loop or registered
+        workspace observers. Since restore_focus() *activates* whatever this
+        returns, a stale answer drags focus to the wrong app and the
+        dictated text lands there. Ask the window server instead, which
+        reports the true front window every call.
+        """
         import objc
-        from AppKit import NSWorkspace
+        from AppKit import NSRunningApplication
+        from Quartz import (
+            CGWindowListCopyWindowInfo,
+            kCGNullWindowID,
+            kCGWindowListOptionOnScreenOnly,
+        )
 
         with objc.autorelease_pool():
-            return NSWorkspace.sharedWorkspace().frontmostApplication()
+            windows = CGWindowListCopyWindowInfo(
+                kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+            ) or []
+            # The list is ordered front to back; layer 0 skips menu bar,
+            # dock and other chrome so we land on a real application window.
+            for window in windows:
+                if window.get("kCGWindowLayer", 1) != 0:
+                    continue
+                pid = window.get("kCGWindowOwnerPID")
+                if pid:
+                    return NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        return None
 
     def restore_focus(self, app_handle):
         if app_handle is None:
