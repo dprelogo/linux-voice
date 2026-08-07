@@ -187,6 +187,29 @@ def check_environment(platform):
         sys.exit(1)
 
 
+def restart_process():
+    """Replace this process with a fresh copy of itself.
+
+    Restarts must not be delegated to the service supervisor by exiting.
+    A launchd agent with KeepAlive is not respawned after it exits, so an
+    exiting process stays dead and the hotkey silently stops working; the
+    packaged systemd unit uses Restart=on-failure and likewise never
+    restarts after a successful exit. execv keeps the restart in our own
+    hands and gives the fresh process the new Accessibility token and a
+    clean audio state that exiting was meant to obtain.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
+    except Exception as e:
+        # Never leave the user without a running daemon: if execv fails the
+        # supervisor is the only remaining hope, so exit non-zero to give
+        # Restart=on-failure a chance rather than exiting silently clean.
+        print(f"\033[91mRestart failed: {e}\033[0m", flush=True)
+        os._exit(1)
+
+
 def _has_all_modifiers(pressed: set, required_types: set) -> bool:
     """Check if all required modifier types are pressed."""
     for mod_type in required_types:
@@ -335,7 +358,7 @@ Instruction: {instruction}{context_note}"""
             print(f"\033[91mAudio error: {e}\033[0m", flush=True)
             if self._consecutive_audio_errors >= 3:
                 print("Too many audio errors, restarting...", flush=True)
-                os._exit(0)  # launchd KeepAlive will restart us
+                restart_process()
 
     def stop_recording(self):
         if not self.recording:
@@ -554,7 +577,7 @@ Instruction: {instruction}{context_note}"""
             self.stop_recording()
 
     def _setup_wake_listener(self):
-        """On macOS, exit on wake from sleep so launchd restarts us.
+        """On macOS, re-exec on wake from sleep.
 
         This is needed because macOS invalidates Accessibility trust
         tokens after sleep, causing CGEvents to silently fail.
@@ -569,7 +592,7 @@ Instruction: {instruction}{context_note}"""
                 print("System wake detected, waiting for Accessibility restore...", flush=True)
                 time.sleep(10)  # wait for macOS to restore Accessibility trust
                 print("Restarting...", flush=True)
-                os._exit(0)  # launchd KeepAlive will restart us
+                restart_process()
 
             center = NSWorkspace.sharedWorkspace().notificationCenter()
             center.addObserverForName_object_queue_usingBlock_(
