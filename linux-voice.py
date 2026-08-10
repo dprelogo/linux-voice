@@ -15,9 +15,15 @@ import shutil
 import subprocess
 import sys
 import threading
+import faulthandler
 import time
 import wave
 from pathlib import Path
+
+# A crash in the Objective-C or PortAudio layers kills the process with a
+# bare signal and no Python context, which leaves the log showing only that
+# the daemon stopped. Dump every thread's stack to stderr on the way down.
+faulthandler.enable()
 
 # Resolve the /usr/bin symlink so the packaged sibling module is importable.
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
