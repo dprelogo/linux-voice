@@ -13,6 +13,14 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections import namedtuple
+
+# Focus handle for macOS. Deliberately plain Python: an Objective-C object
+# stored here would be captured on the hotkey thread and messaged later by
+# restore_focus() on the transcription thread, and any lifetime mistake in
+# that hand-off surfaces as a segfault inside objc_msgSend rather than an
+# exception. A pid and a name cannot dangle.
+FocusTarget = namedtuple("FocusTarget", "pid name")
 
 
 class PlatformInterface(ABC):
@@ -140,7 +148,6 @@ class MacOS(PlatformInterface):
         reports the true front window every call.
         """
         import objc
-        from AppKit import NSRunningApplication
         from Quartz import (
             CGWindowListCopyWindowInfo,
             kCGNullWindowID,
@@ -158,7 +165,9 @@ class MacOS(PlatformInterface):
                     continue
                 pid = window.get("kCGWindowOwnerPID")
                 if pid:
-                    return NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+                    # int() and str() copy out of the Objective-C objects so
+                    # nothing bridged escapes this autorelease pool.
+                    return FocusTarget(int(pid), str(window.get("kCGWindowOwnerName") or pid))
         return None
 
     def restore_focus(self, app_handle):
@@ -166,10 +175,21 @@ class MacOS(PlatformInterface):
             return
         try:
             import objc
-            from AppKit import NSApplicationActivateIgnoringOtherApps
+            from AppKit import (
+                NSApplicationActivateIgnoringOtherApps,
+                NSRunningApplication,
+            )
 
+            # Resolve the pid to a live application here, so the Objective-C
+            # object is created and messaged inside one pool on one thread
+            # and never outlives this call.
             with objc.autorelease_pool():
-                app_handle.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+                app = NSRunningApplication.runningApplicationWithProcessIdentifier_(
+                    app_handle.pid
+                )
+                if app is None:
+                    return
+                app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
             # Brief sleep to let window manager process the activation
             time.sleep(0.05)
         except Exception:
