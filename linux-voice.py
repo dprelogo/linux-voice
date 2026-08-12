@@ -207,7 +207,10 @@ def restart_process():
     sys.stdout.flush()
     sys.stderr.flush()
     try:
-        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
+        # -u matches how the service starts us; without it the log turns
+        # block-buffered after a restart and a later crash loses its tail.
+        os.execv(sys.executable,
+                 [sys.executable, "-u", str(Path(__file__).resolve())] + sys.argv[1:])
     except Exception as e:
         # Never leave the user without a running daemon: if execv fails the
         # supervisor is the only remaining hope, so exit non-zero to give
