@@ -219,6 +219,67 @@ def restart_process():
         os._exit(1)
 
 
+### Hotkey diagnostics ######################################################
+#
+# A held hotkey has been seen to not stop on release, needing a further
+# press to end the recording, which is what a key-up that never arrived
+# looks like from inside on_press/on_release. These record what the
+# listener actually delivered so the next occurrence is evidence instead
+# of a guess.
+#
+# Only the configured hotkey and modifier keys are ever written out.
+# Ordinary typing is never logged, and neither is the transcribed text
+# beyond what the ledger already keeps. Set LINUX_VOICE_DEBUG_KEYS=0 to
+# turn this off.
+
+DEBUG_KEYS = os.environ.get("LINUX_VOICE_DEBUG_KEYS", "1") != "0"
+
+
+def log_key(action: str, key, held: bool, recording: bool, note: str = ""):
+    """Record one hotkey transition and the state it found."""
+    if not DEBUG_KEYS:
+        return
+    stamp = time.strftime("%H:%M:%S")
+    print(f"[keys] {stamp} {action:<7} {key} held={held} rec={recording}"
+          f"{' ' + note if note else ''}", flush=True)
+
+
+def make_listener(on_press, on_release):
+    """Build the keyboard listener, reporting event-tap shutdowns on macOS.
+
+    macOS disables an event tap whose callback runs too long, and pynput
+    neither reports that nor re-enables the tap, so the hotkey goes dead
+    with nothing in the log. Announcing it separates a dead tap from a
+    single dropped key event, which need different fixes.
+    """
+    if sys.platform != "darwin":
+        return keyboard.Listener(on_press=on_press, on_release=on_release)
+
+    try:
+        from Quartz import (
+            kCGEventTapDisabledByTimeout,
+            kCGEventTapDisabledByUserInput,
+        )
+
+        class _TapAwareListener(keyboard.Listener):
+            def _handler(self, proxy, event_type, event, refcon):
+                if event_type in (kCGEventTapDisabledByTimeout,
+                                  kCGEventTapDisabledByUserInput):
+                    why = ("callback too slow"
+                           if event_type == kCGEventTapDisabledByTimeout
+                           else "user input")
+                    print(f"[keys] {time.strftime('%H:%M:%S')} EVENT TAP "
+                          f"DISABLED ({why}); the hotkey is dead until this "
+                          f"process restarts", flush=True)
+                return super()._handler(proxy, event_type, event, refcon)
+
+        return _TapAwareListener(on_press=on_press, on_release=on_release)
+    except Exception as e:
+        # Diagnostics must never be the reason dictation stops working.
+        print(f"Warning: event tap diagnostics unavailable: {e}", flush=True)
+        return keyboard.Listener(on_press=on_press, on_release=on_release)
+
+
 def _has_all_modifiers(pressed: set, required_types: set) -> bool:
     """Check if all required modifier types are pressed."""
     for mod_type in required_types:
@@ -535,6 +596,17 @@ Instruction: {instruction}{context_note}"""
         if key in all_modifiers:
             self.pressed_modifiers.add(key)
 
+        if key in all_modifiers or key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY):
+            log_key("press", key, self.hotkey_pressed, self.recording)
+
+        # Arriving here still held means the key-up for the previous press
+        # never reached us: hotkey_pressed is only cleared by on_release.
+        # This is the signature of the stuck-recording report.
+        if (MODE == "hold" and self.hotkey_pressed
+                and key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY)):
+            log_key("press", key, self.hotkey_pressed, self.recording,
+                    note="WARNING previous release was never delivered")
+
         if key == EDIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _edit_modifier_types
         ):
@@ -580,6 +652,9 @@ Instruction: {instruction}{context_note}"""
         all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
         if key in all_modifiers:
             self.pressed_modifiers.discard(key)
+
+        if key in all_modifiers or key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY):
+            log_key("release", key, self.hotkey_pressed, self.recording)
 
         if MODE == "hold" and key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY) and self.hotkey_pressed:
             self.hotkey_pressed = False
@@ -632,7 +707,7 @@ Instruction: {instruction}{context_note}"""
         self._setup_wake_listener()
 
         try:
-            with keyboard.Listener(
+            with make_listener(
                 on_press=self.on_press,
                 on_release=self.on_release,
             ) as listener:
